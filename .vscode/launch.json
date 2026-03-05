@@ -1,0 +1,39 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "pit-rave-data-resolution-agent",
+            "type": "node",
+            "request": "launch",
+            "runtimeArgs": [
+                "dev"
+            ],
+            "runtimeExecutable": "yarn",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "cwd": "${workspaceFolder}/pit-rave-data-resolution-agent-google-ts",
+            "envFile": "${workspaceFolder}/.env",
+            "outFiles": [],
+            "sourceMaps": true,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "pit-rave-langchain-data-resolution-agent",
+            "type": "node",
+            "request": "launch",
+            "runtimeArgs": [
+                "dev"
+            ],
+            "runtimeExecutable": "yarn",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "cwd": "${workspaceFolder}/pit-rave-data-resolution-agent-lang-chain",
+            "envFile": "${workspaceFolder}/.env",
+            "outFiles": [],
+            "sourceMaps": true,
+            "console": "integratedTerminal"
+        }
+    ]
+}

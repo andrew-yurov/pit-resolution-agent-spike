@@ -1,0 +1,7 @@
+{ 
+    "node_version": "22",
+  "graphs": {
+    "agent": "./src/DataResolutionAgentLangGraph.service.ts:graph"
+  },
+  "env": ".env",
+  "dependencies": [".", "@langchain/langgraph"] }

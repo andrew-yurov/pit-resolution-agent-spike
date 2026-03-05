@@ -1,0 +1,122 @@
+name: DB Deploy
+
+on:
+  workflow_run:
+    workflows: ["Application Build"]
+    types:
+      - completed
+    branches: [ "master", "dev" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  db-deploy-dev:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'dev' }}
+    runs-on: ubuntu-latest
+    env:
+      SHA:                    ${{ github.event.workflow_run.head_sha || github.sha }}
+      AWS_ACCOUNT_ID:         ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+      AWS_REGION:             ${{ secrets.AWS_REGION_DEV }}
+      ECR_REPO:               ${{ secrets.ECR_REPOSITORY_DEV }}
+      ROLE_ARN:               ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+      ROLE_SESS:              ${{ secrets.AWS_ROLE_SESSION_NAME_DEV }}
+      EC2_IDS:                ${{ secrets.EC2_INSTANCE_IDS_DEV }}
+      SQITCH_EN_B64:          ${{ secrets.SQITCH_ENV_B64 }}
+      DB_DIR:                 ${{ secrets.DB_DIR_DEV }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ env.ROLE_ARN }}
+          role-session-name: ${{ env.ROLE_SESS }}
+          aws-region:        ${{ env.AWS_REGION }}
+
+      - name: Login, Build & Push
+        run: |
+          IMAGE=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ env.SHA }}
+          echo "Logging in to ECR"
+          aws ecr get-login-password \
+            | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          echo "Building and pushing image to ECR"
+          cd database
+          docker build -t $IMAGE .
+          docker push    $IMAGE
+          echo "Image pushed to ECR"
+
+      - name: Deploy via SSM
+        run: |
+          IMAGE=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ env.SHA }}
+          DB_DIR=${{ env.DB_DIR }}
+          SQITCH_ENV_B64="${{ env.SQITCH_EN_B64 }}"
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids ${{ env.EC2_IDS }} \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy dev - ${SHA::8}" \
+            --parameters commands='[
+              "aws ecr get-login-password | docker login --username AWS --password-stdin '${{ env.AWS_ACCOUNT_ID }}'.dkr.ecr.'"${{ env.AWS_REGION }}"'.amazonaws.com",
+              "docker system prune -af --volumes",
+              "docker pull '"$IMAGE"'",
+              "mkdir -p '"$DB_DIR"'",
+              "docker run --rm -v '"$DB_DIR"':/target '"$IMAGE"' cp -R /work/. /target/",
+              "sudo chown -R ssm-user:ssm-user '"$DB_DIR"'",
+              "cd '"$DB_DIR"'",
+              "printf %s '"$SQITCH_ENV_B64"' | base64 -d > .sqitch-env",
+              "chmod 600 .sqitch-env",
+              "chmod +x sqitch-run.sh",
+              "./sqitch-run.sh deploy sandbox",
+              "./sqitch-run.sh verify sandbox",
+              "rm -f .sqitch-env"
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+          echo "SSM Command submitted as $CMD_ID; waiting for it to finish ..."
+
+          for id in ${{ env.EC2_IDS }}; do
+            echo "Waiting for command to finish on $id ..."
+            aws ssm wait command-executed \
+              --instance-id $id \
+              --command-id $CMD_ID || true
+            echo "Command finished on $id"
+            echo "=== SSM output for $id ==="
+            echo "--- STDOUT ---"
+            aws ssm get-command-invocation \
+              --instance-id "$id" \
+              --command-id "$CMD_ID" \
+              --query 'StandardOutputContent' \
+              --output text
+            echo "--- STDERR ---"
+            aws ssm get-command-invocation \
+              --instance-id "$id" \
+              --command-id "$CMD_ID" \
+              --query 'StandardErrorContent' \
+              --output text
+            done
+
+          FAILS=0
+          for id in ${{ env.EC2_IDS }}; do
+            echo "Checking command status on $id ..."
+            STATUS=$(aws ssm get-command-invocation \
+              --instance-id $id \
+              --command-id $CMD_ID \
+              --query "Status" \
+              --output text)
+            echo "Command status on $id: $STATUS"
+            if [ "$STATUS" != "Success" ]; then
+              FAILS=$((FAILS + 1))
+            fi
+          done
+
+          if [ $FAILS -gt 0 ]; then
+            echo "SSM command $CMD_ID failed to deploy to $FAILS instances"
+            exit 1
+          fi
+
+          echo "SSM command $CMD_ID completed successfully"
